@@ -66,7 +66,7 @@ class CryptoOverlay:
         self.root.attributes("-topmost", True)
         self.root.attributes("-alpha", 0.93)
         self.root.configure(bg=BG)
-        self.root.geometry(f"{WIN_W}+80+80")
+        self.root.geometry(f"+80+80")
         self.root.resizable(False, False)
 
     def _bind_drag(self):
