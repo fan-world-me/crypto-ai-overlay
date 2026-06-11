@@ -11,7 +11,7 @@ from fastapi.responses import StreamingResponse, JSONResponse
 from config import (
     ALL_MODELS, NVIDIA_BASE_URL, GROQ_BASE_URL,
     NVIDIA_API_KEY, GROQ_API_KEY,
-    AI_TIMEOUT_SEC, MAX_TOKENS, COINS,
+    AI_TIMEOUT_SEC, MAX_TOKENS, REASONING_TOKENS, COINS,
 )
 
 app = FastAPI()
@@ -93,9 +93,12 @@ def _build_prompt(market: dict) -> str:
 
 
 def _parse(text: str) -> str:
+    import re
+    # strip <think>...</think> blocks (reasoning models)
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
     text = text.strip().upper()
     for w in text.split():
-        w = w.strip(".,!?:()")
+        w = w.strip(".,!?:()\n")
         if w in ("BUY", "SELL", "HOLD"):
             return w
     for s in ("BUY", "SELL", "HOLD"):
@@ -113,10 +116,11 @@ async def query_model(client: httpx.AsyncClient, model: dict, market: dict) -> d
     if not api_key:
         return {"model": model["name"], "signal": "NO KEY", "latency_ms": 0, "ok": False}
 
+    is_reasoning = model.get("is_reasoning", False)
     payload = {
         "model":       model["id"],
         "messages":    [{"role": "user", "content": _build_prompt(market)}],
-        "max_tokens":  MAX_TOKENS,
+        "max_tokens":  REASONING_TOKENS if is_reasoning else MAX_TOKENS,
         "temperature": 0.1,
         "stream":      False,
     }
@@ -129,9 +133,13 @@ async def query_model(client: httpx.AsyncClient, model: dict, market: dict) -> d
         )
         elapsed = round((time.monotonic() - t0) * 1000)
         if resp.status_code != 200:
-            err = resp.text[:80]
+            try:
+                err_body = resp.json()
+                err = err_body.get("error", {}).get("message", resp.text[:80])
+            except Exception:
+                err = resp.text[:80]
             return {"model": model["name"], "signal": "ERR", "latency_ms": elapsed,
-                    "ok": False, "err": err}
+                    "ok": False, "err": str(err)[:60]}
         data   = resp.json()
         text   = data["choices"][0]["message"]["content"]
         signal = _parse(text)
