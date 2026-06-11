@@ -226,8 +226,10 @@ class CryptoOverlay:
 
             loop = asyncio.new_event_loop()
             try:
-                async with aiohttp.ClientSession() as session:
-                    result = loop.run_until_complete(query_once(session, model, market))
+                async def _run(m=model, mkt=market):
+                    async with aiohttp.ClientSession() as session:
+                        return await query_once(session, m, mkt)
+                result = loop.run_until_complete(_run())
                 self._results[model["name"]] = result
                 self._q.put({"type": "model", "result": result})
             except Exception as e:
