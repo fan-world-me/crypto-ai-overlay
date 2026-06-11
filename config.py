@@ -17,28 +17,27 @@ COINS = {
 NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
 GROQ_BASE_URL   = "https://api.groq.com/openai/v1/chat/completions"
 
-# Fastest models only — small param count, low latency
+# ── NVIDIA NIM — fastest models for low-latency inference ──────────────────────
 NVIDIA_MODELS = [
-    {"id": "meta/llama-3.2-3b-instruct",           "name": "NIM Llama-3.2-3B",  "provider": "nvidia"},
-    {"id": "meta/llama-3.1-8b-instruct",           "name": "NIM Llama-3.1-8B",  "provider": "nvidia"},
-    {"id": "microsoft/phi-3-mini-128k-instruct",   "name": "NIM Phi-3-Mini",    "provider": "nvidia"},
-    {"id": "nvidia/llama-3.1-nemotron-nano-8b-v1", "name": "NIM Nemotron-8B",   "provider": "nvidia"},
-    {"id": "google/gemma-2-9b-it",                 "name": "NIM Gemma-2-9B",    "provider": "nvidia"},
-    {"id": "mistralai/mistral-7b-instruct-v0.3",   "name": "NIM Mistral-7B",    "provider": "nvidia"},
-    {"id": "mistralai/mistral-nemo-12b-instruct",  "name": "NIM Mistral-Nemo",  "provider": "nvidia"},
+    {"id": "mistralai/mistral-7b-instruct-v0.3",        "name": "NIM Mistral-7B",     "provider": "nvidia"},
+    {"id": "google/gemma-2-9b-it",                      "name": "NIM Gemma-2-9B",     "provider": "nvidia"},
+    {"id": "meta/llama-3.1-8b-instruct",                "name": "NIM Llama-3.1-8B",   "provider": "nvidia"},
+    {"id": "microsoft/phi-3.5-mini-instruct",           "name": "NIM Phi-3.5-Mini",   "provider": "nvidia"},
+    {"id": "deepseek-ai/deepseek-r1-distill-llama-8b",  "name": "NIM DeepSeek-R1-8B", "provider": "nvidia"},
+    {"id": "qwen/qwen2.5-7b-instruct",                  "name": "NIM Qwen-2.5-7B",    "provider": "nvidia"},
+    {"id": "nvidia/nemotron-mini-4b-instruct",          "name": "NIM Nemotron-4B",    "provider": "nvidia"},
 ]
 
+# ── Groq — ultra-fast inference chips ─────────────────────────────────────────
 GROQ_MODELS = [
-    {"id": "llama-3.1-8b-instant", "name": "Groq Llama-8B",  "provider": "groq"},
-    {"id": "gemma2-9b-it",         "name": "Groq Gemma-9B",  "provider": "groq"},
-    {"id": "mixtral-8x7b-32768",   "name": "Groq Mixtral",   "provider": "groq"},
+    {"id": "llama-3.1-8b-instant",   "name": "Groq Llama-8B",   "provider": "groq"},
+    {"id": "qwen-qwq-32b",           "name": "Groq Qwen-QwQ",   "provider": "groq"},
+    {"id": "llama-3.3-70b-versatile","name": "Groq Llama-70B",  "provider": "groq"},
 ]
 
 ALL_MODELS = NVIDIA_MODELS + GROQ_MODELS
 
-# Per-request timeout (seconds). Cloud APIs need 3-8s for even tiny completions.
-AI_TIMEOUT_SEC = 6.0
-MAX_TOKENS     = 5
-
-# How often to refresh market data (seconds)
+# Per-request timeout — cloud APIs need 4-8s even for 5-token replies
+AI_TIMEOUT_SEC     = 7.0
+MAX_TOKENS         = 5
 MARKET_REFRESH_SEC = 4
