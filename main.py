@@ -1,20 +1,23 @@
 """
 Crypto AI Overlay — Windows always-on-top trading signal analyzer.
-Each model runs its own independent async loop:
-  fetch market → query AI → update UI → repeat immediately
-UI updates live as responses arrive, no waiting for all models.
+Architecture:
+  - FastAPI server runs in a background thread (localhost:8765)
+  - SSE stream delivers model results as they arrive
+  - tkinter UI updates in real-time via queue
 """
-import asyncio
+import json
 import queue
 import threading
 import time
 import tkinter as tk
+import requests
+import uvicorn
 
-import aiohttp
+from server import app
+from config import ALL_MODELS, COINS
 
-from bybit_client import get_market_data
-from ai_analyzer import query_once, majority_signal
-from config import COINS, ALL_MODELS, MARKET_REFRESH_SEC
+SERVER_PORT = 8765
+SERVER_URL  = f"http://127.0.0.1:{SERVER_PORT}"
 
 # ── Colors ──────────────────────────────────────────────────────────────────────
 BG       = "#0d0d0d"
@@ -31,7 +34,20 @@ ACCENT   = "#2979ff"
 
 SIGNAL_FG = {"BUY": GREEN, "SELL": RED, "HOLD": YELLOW}
 
-WIN_W = 330
+
+def _majority(results: dict) -> tuple[str, int]:
+    votes = [r["signal"] for r in results.values() if r["signal"] in ("BUY", "SELL", "HOLD")]
+    if not votes:
+        return "—", 0
+    buy  = votes.count("BUY")
+    sell = votes.count("SELL")
+    hold = votes.count("HOLD")
+    total = len(votes)
+    if buy >= sell and buy >= hold:
+        return "BUY",  round(buy  / total * 100)
+    if sell >= buy  and sell >= hold:
+        return "SELL", round(sell / total * 100)
+    return "HOLD", round(hold / total * 100)
 
 
 class CryptoOverlay:
@@ -39,23 +55,21 @@ class CryptoOverlay:
         self.root = tk.Tk()
         self._configure_window()
 
-        # shared state — written by bg threads, read by UI poll
-        self.selected_coin  = tk.StringVar(value="BTC")
-        self.running        = True
-        self._market: dict  = {}           # latest market snapshot
-        self._results: dict = {}           # model_name → latest result dict
+        self.selected_coin = "BTC"
+        self.running       = True
+        self._results: dict = {}
         self._q: queue.Queue = queue.Queue()
         self._drag_x = self._drag_y = 0
 
         self._build_ui()
         self._bind_drag()
-
-        # start one bg thread per model + one market fetcher
-        self._start_loops()
+        self._start_server()
+        self._wait_for_server()
+        self._trigger_analyze()
         self._poll_queue()
         self.root.mainloop()
 
-    # ── Window ───────────────────────────────────────────────────────────────────
+    # ── Window ────────────────────────────────────────────────────────────────
     def _configure_window(self):
         self.root.overrideredirect(True)
         self.root.attributes("-topmost", True)
@@ -66,40 +80,32 @@ class CryptoOverlay:
 
     def _bind_drag(self):
         for w in (self.root, self._title_bar):
-            w.bind("<Button-1>", self._drag_start)
-            w.bind("<B1-Motion>", self._drag_move)
+            w.bind("<Button-1>", lambda e: (setattr(self, '_drag_x', e.x_root - self.root.winfo_x()),
+                                            setattr(self, '_drag_y', e.y_root - self.root.winfo_y())))
+            w.bind("<B1-Motion>", lambda e: self.root.geometry(
+                f"+{e.x_root - self._drag_x}+{e.y_root - self._drag_y}"))
 
-    def _drag_start(self, e):
-        self._drag_x = e.x_root - self.root.winfo_x()
-        self._drag_y = e.y_root - self.root.winfo_y()
-
-    def _drag_move(self, e):
-        self.root.geometry(f"+{e.x_root - self._drag_x}+{e.y_root - self._drag_y}")
-
-    # ── UI ───────────────────────────────────────────────────────────────────────
+    # ── UI ────────────────────────────────────────────────────────────────────
     def _build_ui(self):
         r = self.root
 
-        # title bar
         self._title_bar = tk.Frame(r, bg=BG_PANEL, height=30)
         self._title_bar.pack(fill=tk.X)
         tk.Label(self._title_bar, text="◈  CRYPTO AI", bg=BG_PANEL, fg=ACCENT,
                  font=("Consolas", 9, "bold")).pack(side=tk.LEFT, padx=10, pady=5)
-        x_btn = tk.Label(self._title_bar, text="✕", bg=BG_PANEL, fg=TEXT_MID,
-                         font=("Consolas", 10), cursor="hand2")
-        x_btn.pack(side=tk.RIGHT, padx=10)
-        x_btn.bind("<Button-1>", lambda _: self._quit())
+        x = tk.Label(self._title_bar, text="✕", bg=BG_PANEL, fg=TEXT_MID,
+                     font=("Consolas", 10), cursor="hand2")
+        x.pack(side=tk.RIGHT, padx=10)
+        x.bind("<Button-1>", lambda _: self._quit())
 
         _sep(r)
 
-        # coin buttons
         coin_row = tk.Frame(r, bg=BG, pady=7)
         coin_row.pack(fill=tk.X, padx=8)
         self._coin_btns = {}
         for coin in COINS:
             b = tk.Label(coin_row, text=coin, bg=BG_PANEL, fg=TEXT_MID,
-                         font=("Consolas", 8, "bold"), width=5, pady=3,
-                         cursor="hand2")
+                         font=("Consolas", 8, "bold"), width=5, pady=3, cursor="hand2")
             b.pack(side=tk.LEFT, padx=2)
             b.bind("<Button-1>", lambda e, c=coin: self._switch_coin(c))
             self._coin_btns[coin] = b
@@ -107,36 +113,33 @@ class CryptoOverlay:
 
         _sep(r)
 
-        # price row
-        price_row = tk.Frame(r, bg=BG, pady=5)
-        price_row.pack(fill=tk.X, padx=12)
-        self.lbl_price  = tk.Label(price_row, text="$—", bg=BG, fg=WHITE,
+        pr = tk.Frame(r, bg=BG, pady=5)
+        pr.pack(fill=tk.X, padx=12)
+        self.lbl_price  = tk.Label(pr, text="$—", bg=BG, fg=WHITE,
                                    font=("Consolas", 18, "bold"), anchor=tk.W)
         self.lbl_price.pack(side=tk.LEFT)
-        self.lbl_change = tk.Label(price_row, text="", bg=BG, fg=TEXT_MID,
+        self.lbl_change = tk.Label(pr, text="", bg=BG, fg=TEXT_MID,
                                    font=("Consolas", 9), anchor=tk.E)
         self.lbl_change.pack(side=tk.RIGHT)
 
         _sep(r)
 
-        # big signal
-        sig_frame = tk.Frame(r, bg=BG, pady=8)
-        sig_frame.pack(fill=tk.X, padx=12)
-        self.lbl_signal = tk.Label(sig_frame, text="—", bg=BG, fg=TEXT_MID,
+        sf = tk.Frame(r, bg=BG, pady=8)
+        sf.pack(fill=tk.X, padx=12)
+        self.lbl_signal = tk.Label(sf, text="—", bg=BG, fg=TEXT_MID,
                                    font=("Consolas", 38, "bold"))
         self.lbl_signal.pack(fill=tk.X)
-        self.lbl_conf   = tk.Label(sig_frame, text="Waiting for models…", bg=BG,
+        self.lbl_conf   = tk.Label(sf, text="Connecting to server…", bg=BG,
                                    fg=TEXT_MID, font=("Consolas", 8))
         self.lbl_conf.pack()
 
         _sep(r)
 
-        # vote counters
-        vote_row = tk.Frame(r, bg=BG, pady=3)
-        vote_row.pack(fill=tk.X, padx=12)
+        vr = tk.Frame(r, bg=BG, pady=3)
+        vr.pack(fill=tk.X, padx=12)
         self.lbl_votes = {}
         for sig, clr in [("BUY", GREEN), ("HOLD", YELLOW), ("SELL", RED)]:
-            col = tk.Frame(vote_row, bg=BG)
+            col = tk.Frame(vr, bg=BG)
             col.pack(side=tk.LEFT, expand=True)
             tk.Label(col, text=sig, bg=BG, fg=clr,
                      font=("Consolas", 7, "bold")).pack()
@@ -147,30 +150,25 @@ class CryptoOverlay:
 
         _sep(r)
 
-        # model list header
         hdr = tk.Frame(r, bg=BG)
         hdr.pack(fill=tk.X, padx=12, pady=(5, 1))
         tk.Label(hdr, text="MODELS", bg=BG, fg=TEXT_DIM,
                  font=("Consolas", 7, "bold")).pack(side=tk.LEFT)
-        self.lbl_responded = tk.Label(hdr, text="0/0 responded", bg=BG,
-                                      fg=TEXT_DIM, font=("Consolas", 7))
+        self.lbl_responded = tk.Label(hdr, text="0/0", bg=BG, fg=TEXT_DIM,
+                                      font=("Consolas", 7))
         self.lbl_responded.pack(side=tk.RIGHT)
 
-        # model rows (one per model, created once)
         self._model_rows: dict = {}
-        models_frame = tk.Frame(r, bg=BG)
-        models_frame.pack(fill=tk.X, padx=10, pady=(0, 5))
+        mf = tk.Frame(r, bg=BG)
+        mf.pack(fill=tk.X, padx=10, pady=(0, 5))
         for m in ALL_MODELS:
-            row = tk.Frame(models_frame, bg=BG)
+            row = tk.Frame(mf, bg=BG)
             row.pack(fill=tk.X, pady=1)
-            dot  = tk.Label(row, text="●", bg=BG, fg=TEXT_DIM,
-                            font=("Consolas", 7))
+            dot  = tk.Label(row, text="●", bg=BG, fg=TEXT_DIM, font=("Consolas", 7))
             dot.pack(side=tk.LEFT, padx=(2, 4))
-            name = tk.Label(row, text=m["name"], bg=BG, fg=TEXT_MID,
-                            font=("Consolas", 7), anchor=tk.W)
-            name.pack(side=tk.LEFT)
-            lat  = tk.Label(row, text="…", bg=BG, fg=TEXT_DIM,
-                            font=("Consolas", 7))
+            tk.Label(row, text=m["name"], bg=BG, fg=TEXT_MID,
+                     font=("Consolas", 7), anchor=tk.W).pack(side=tk.LEFT)
+            lat  = tk.Label(row, text="…", bg=BG, fg=TEXT_DIM, font=("Consolas", 7))
             lat.pack(side=tk.RIGHT, padx=4)
             sig  = tk.Label(row, text="—", bg=BG, fg=TEXT_DIM,
                             font=("Consolas", 7, "bold"), width=5, anchor=tk.E)
@@ -179,81 +177,85 @@ class CryptoOverlay:
 
         _sep(r)
 
-        # status bar
         bar = tk.Frame(r, bg=BG_PANEL, pady=3)
         bar.pack(fill=tk.X)
-        self.lbl_status = tk.Label(bar, text="Starting…", bg=BG_PANEL,
+        self.lbl_status = tk.Label(bar, text="Starting server…", bg=BG_PANEL,
                                    fg=TEXT_DIM, font=("Consolas", 7))
         self.lbl_status.pack(side=tk.LEFT, padx=8)
-        self.lbl_time = tk.Label(bar, text="", bg=BG_PANEL, fg=TEXT_DIM,
-                                 font=("Consolas", 7))
+        self.lbl_time   = tk.Label(bar, text="", bg=BG_PANEL, fg=TEXT_DIM,
+                                   font=("Consolas", 7))
         self.lbl_time.pack(side=tk.RIGHT, padx=8)
+        refresh_btn = tk.Label(bar, text="↺", bg=BG_PANEL, fg=ACCENT,
+                               font=("Consolas", 10), cursor="hand2")
+        refresh_btn.pack(side=tk.RIGHT, padx=4)
+        refresh_btn.bind("<Button-1>", lambda _: self._trigger_analyze())
 
-    # ── Background loops ─────────────────────────────────────────────────────────
-    def _start_loops(self):
-        """One thread per model + one thread for market data."""
-        threading.Thread(target=self._market_loop, daemon=True).start()
-        for model in ALL_MODELS:
-            threading.Thread(target=self._model_loop, args=(model,), daemon=True).start()
+    # ── Server ────────────────────────────────────────────────────────────────
+    def _start_server(self):
+        def run():
+            uvicorn.run(app, host="127.0.0.1", port=SERVER_PORT,
+                        log_level="error", access_log=False)
+        threading.Thread(target=run, daemon=True).start()
 
-    def _market_loop(self):
-        """Continuously refresh market data and push to queue."""
-        while self.running:
-            coin = self.selected_coin.get()
-            loop = asyncio.new_event_loop()
+    def _wait_for_server(self):
+        """Block tkinter start until FastAPI is ready."""
+        for _ in range(40):
             try:
-                data = loop.run_until_complete(get_market_data(coin))
-                if data:
-                    self._market = data
-                    self._q.put({"type": "market", "data": data})
+                requests.get(f"{SERVER_URL}/health", timeout=0.5)
+                self.lbl_status.configure(text="✓ Server ready")
+                return
             except Exception:
-                pass
-            finally:
-                loop.close()
-            time.sleep(MARKET_REFRESH_SEC)
+                time.sleep(0.25)
+        self.lbl_status.configure(text="⚠ Server not responding")
 
-    def _model_loop(self, model: dict):
-        """Each model: query → update UI → query again immediately."""
-        # stagger startup so models don't all hammer APIs at once
-        import random
-        time.sleep(random.uniform(0, 1.5))
+    # ── Analysis ──────────────────────────────────────────────────────────────
+    def _trigger_analyze(self):
+        self._results.clear()
+        for row in self._model_rows.values():
+            row["dot"].configure(fg=TEXT_DIM)
+            row["sig"].configure(text="—", fg=TEXT_DIM)
+            row["lat"].configure(text="…")
+        self.lbl_signal.configure(text="…", fg=TEXT_MID)
+        self.lbl_conf.configure(text="Querying models…", fg=TEXT_MID)
+        for lv in self.lbl_votes.values():
+            lv.configure(text="0")
+        threading.Thread(target=self._stream_analyze,
+                         args=(self.selected_coin,), daemon=True).start()
 
-        while self.running:
-            market = self._market
-            if not market:
-                time.sleep(0.5)
-                continue
+    def _stream_analyze(self, coin: str):
+        try:
+            with requests.get(f"{SERVER_URL}/analyze/{coin}", stream=True, timeout=30) as resp:
+                for raw in resp.iter_lines():
+                    if not self.running:
+                        break
+                    if not raw:
+                        continue
+                    line = raw.decode("utf-8") if isinstance(raw, bytes) else raw
+                    if not line.startswith("data: "):
+                        continue
+                    msg = json.loads(line[6:])
+                    self._q.put(msg)
+        except Exception as e:
+            self._q.put({"type": "error", "msg": str(e)[:60]})
 
-            loop = asyncio.new_event_loop()
-            try:
-                async def _run(m=model, mkt=market):
-                    async with aiohttp.ClientSession() as session:
-                        return await query_once(session, m, mkt)
-                result = loop.run_until_complete(_run())
-                self._results[model["name"]] = result
-                self._q.put({"type": "model", "result": result})
-            except Exception as e:
-                self._results[model["name"]] = {
-                    "model": model["name"], "signal": "ERR",
-                    "latency_ms": 0, "ok": False, "err": str(e)[:40],
-                }
-                self._q.put({"type": "model", "result": self._results[model["name"]]})
-            finally:
-                loop.close()
-
-            # tiny pause before next request to avoid rate-limits
-            time.sleep(0.5)
-
-    # ── UI updates ───────────────────────────────────────────────────────────────
+    # ── Queue poll ────────────────────────────────────────────────────────────
     def _poll_queue(self):
         try:
             while True:
                 msg = self._q.get_nowait()
-                if msg["type"] == "market":
-                    self._update_price(msg["data"])
-                elif msg["type"] == "model":
-                    self._update_model_row(msg["result"])
-                    self._update_vote_totals()
+                t = msg.get("type")
+                if t == "market":
+                    self._show_price(msg["data"])
+                elif t == "signal":
+                    self._show_model(msg["result"])
+                    self._refresh_vote_totals()
+                elif t == "done":
+                    self._refresh_vote_totals()
+                    self.lbl_status.configure(
+                        text=f"✓ Done  {time.strftime('%H:%M:%S')}")
+                    self.root.after(5000, self._trigger_analyze)
+                elif t == "error":
+                    self.lbl_status.configure(text=f"✗ {msg['msg'][:40]}")
         except queue.Empty:
             pass
 
@@ -261,72 +263,51 @@ class CryptoOverlay:
         if self.running:
             self.root.after(200, self._poll_queue)
 
-    def _update_price(self, d: dict):
-        price = d["price"]
-        price_str = (f"${price:,.0f}" if price >= 1000
-                     else f"${price:,.2f}" if price >= 1
-                     else f"${price:.5f}")
-        self.lbl_price.configure(text=price_str)
+    def _show_price(self, d: dict):
+        p = d["price"]
+        ps = (f"${p:,.0f}" if p >= 1000 else f"${p:,.2f}" if p >= 1 else f"${p:.5f}")
+        self.lbl_price.configure(text=ps)
         ch = d["change_24h"]
         self.lbl_change.configure(
             text=f"{ch:+.2f}% 24h  {d['change_1h']:+.2f}% 1h",
             fg=GREEN if ch >= 0 else RED,
         )
-        self.lbl_status.configure(text=f"✓ {d['symbol']} live")
 
-    def _update_model_row(self, r: dict):
+    def _show_model(self, r: dict):
         row = self._model_rows.get(r["model"])
         if not row:
             return
-        sig = r["signal"]
-        clr = SIGNAL_FG.get(sig, TEXT_DIM)
+        clr = SIGNAL_FG.get(r["signal"], TEXT_DIM)
         row["dot"].configure(fg=clr)
-        row["sig"].configure(text=sig, fg=clr)
-        lat_txt = f"{r['latency_ms']}ms" if r.get("ok") else sig[:7]
-        row["lat"].configure(text=lat_txt)
+        row["sig"].configure(text=r["signal"][:7], fg=clr)
+        row["lat"].configure(text=f"{r['latency_ms']}ms" if r.get("ok") else r["signal"][:6])
 
-    def _update_vote_totals(self):
-        results = self._results
-        votes = [r["signal"] for r in results.values() if r["signal"] in ("BUY", "SELL", "HOLD")]
+    def _refresh_vote_totals(self):
+        votes = [r["signal"] for r in self._results.values()
+                 if r["signal"] in ("BUY", "SELL", "HOLD")]
         responded = len(votes)
         total     = len(ALL_MODELS)
-
-        for sig, lbl in self.lbl_votes.items():
-            lbl.configure(text=str(votes.count(sig)))
-
+        for sig, lv in self.lbl_votes.items():
+            lv.configure(text=str(votes.count(sig)))
         self.lbl_responded.configure(text=f"{responded}/{total} responded")
-
         if not votes:
             return
-
-        verdict, conf = majority_signal(results)
+        verdict, conf = _majority(self._results)
         clr = SIGNAL_FG.get(verdict, TEXT_MID)
         self.lbl_signal.configure(text=verdict, fg=clr)
         self.lbl_conf.configure(
-            text=f"{conf}% confidence  ({responded}/{total} models)",
-            fg=clr,
-        )
+            text=f"{conf}% confidence  ({responded}/{total} models)", fg=clr)
 
-    # ── Coin switch ──────────────────────────────────────────────────────────────
+    # ── Coin switch ───────────────────────────────────────────────────────────
     def _switch_coin(self, coin: str):
-        self.selected_coin.set(coin)
+        self.selected_coin = coin
         self._highlight_coin(coin)
-        # clear old results when switching coin
-        self._results.clear()
-        self._market = {}
-        for row in self._model_rows.values():
-            row["dot"].configure(fg=TEXT_DIM)
-            row["sig"].configure(text="—", fg=TEXT_DIM)
-            row["lat"].configure(text="…")
-        self.lbl_signal.configure(text="—", fg=TEXT_MID)
-        self.lbl_conf.configure(text="Switching coin…", fg=TEXT_MID)
-        for lbl in self.lbl_votes.values():
-            lbl.configure(text="0")
+        self._trigger_analyze()
 
     def _highlight_coin(self, coin: str):
-        for c, btn in self._coin_btns.items():
-            btn.configure(bg=ACCENT if c == coin else BG_PANEL,
-                          fg="#000000" if c == coin else TEXT_MID)
+        for c, b in self._coin_btns.items():
+            b.configure(bg=ACCENT if c == coin else BG_PANEL,
+                        fg="#000000" if c == coin else TEXT_MID)
 
     def _quit(self):
         self.running = False
