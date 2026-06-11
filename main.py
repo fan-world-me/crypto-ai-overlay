@@ -46,7 +46,6 @@ class CryptoOverlay:
     def __init__(self):
         self.root = tk.Tk()
         self._configure_window()
-        self._build_ui()
 
         self.q: queue.Queue   = queue.Queue()
         self.selected_coin    = tk.StringVar(value="BTC")
@@ -55,6 +54,7 @@ class CryptoOverlay:
         self._is_busy         = False
         self._drag_x = self._drag_y = 0
 
+        self._build_ui()
         self._bind_drag()
         self._schedule_refresh()
         self._poll_queue()
