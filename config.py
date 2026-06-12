@@ -32,7 +32,7 @@ GROQ_MODELS = [
     {"id": "llama-3.1-8b-instant",                            "name": "Groq Llama-8B",      "provider": "groq"},
     {"id": "llama-3.3-70b-versatile",                         "name": "Groq Llama-70B",     "provider": "groq"},
     {"id": "meta-llama/llama-4-scout-17b-16e-instruct",       "name": "Groq Llama-4-Scout", "provider": "groq"},
-    {"id": "qwen/qwen3-32b",                                   "name": "Groq Qwen3-32B",     "provider": "groq"},
+    {"id": "qwen/qwen3-32b",                                   "name": "Groq Qwen3-32B",     "provider": "groq", "is_reasoning": True},
 ]
 
 ALL_MODELS = NVIDIA_MODELS + GROQ_MODELS
@@ -40,4 +40,6 @@ ALL_MODELS = NVIDIA_MODELS + GROQ_MODELS
 AI_TIMEOUT_SEC   = 10.0   # cloud APIs vary; 10s covers p99
 MAX_TOKENS       = 6      # enough for BUY/SELL/HOLD + punctuation
 REASONING_TOKENS = 1000   # reserved for future reasoning models
-MARKET_REFRESH_SEC = 4
+AI_REFRESH_SEC   = 20     # AI votes refresh every 20 seconds to conserve API credits
+LIVE_PRICE_REFRESH_SEC = 1.2 # Price updates in real-time every 1.2 seconds
+

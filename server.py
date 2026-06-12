@@ -18,12 +18,13 @@ app = FastAPI()
 
 # ── Bybit ─────────────────────────────────────────────────────────────────────
 
-async def _bybit_ticker(client: httpx.AsyncClient, symbol: str) -> dict | None:
-    for category in ("linear", "spot"):
+async def _bybit_ticker(client: httpx.AsyncClient, symbol: str, category: str = "linear") -> dict | None:
+    categories = (category, "spot" if category == "linear" else "linear")
+    for cat in categories:
         try:
             r = await client.get(
                 "https://api.bybit.com/v5/market/tickers",
-                params={"category": category, "symbol": symbol},
+                params={"category": cat, "symbol": symbol},
                 timeout=5.0,
             )
             d = r.json()
@@ -31,7 +32,7 @@ async def _bybit_ticker(client: httpx.AsyncClient, symbol: str) -> dict | None:
                 it = d["result"]["list"][0]
                 return {
                     "symbol":     symbol,
-                    "category":   category,
+                    "category":   cat,
                     "price":      float(it["lastPrice"]),
                     "change_24h": float(it["price24hPcnt"]) * 100,
                     "high_24h":   float(it["highPrice24h"]),
@@ -43,7 +44,7 @@ async def _bybit_ticker(client: httpx.AsyncClient, symbol: str) -> dict | None:
 
 
 async def _bybit_kline_change(client: httpx.AsyncClient, symbol: str, category: str) -> float:
-    for cat in (category, "spot"):
+    for cat in (category, "spot" if category == "linear" else "linear"):
         try:
             r = await client.get(
                 "https://api.bybit.com/v5/market/kline",
@@ -62,15 +63,12 @@ async def _bybit_kline_change(client: httpx.AsyncClient, symbol: str, category: 
     return 0.0
 
 
-async def get_market(coin: str) -> dict | None:
+async def get_market(coin: str, category: str = "linear") -> dict | None:
     symbol = COINS.get(coin)
     if not symbol:
         return None
     async with httpx.AsyncClient() as client:
-        ticker, ch1h = await asyncio.gather(
-            _bybit_ticker(client, symbol),
-            asyncio.sleep(0),          # placeholder, replaced below
-        )
+        ticker = await _bybit_ticker(client, symbol, category)
         if not ticker:
             return None
         ch1h = await _bybit_kline_change(client, symbol, ticker["category"])
@@ -82,13 +80,16 @@ async def get_market(coin: str) -> dict | None:
 
 def _build_prompt(market: dict) -> str:
     return (
-        "You are a crypto trading signal bot. "
-        "Reply with ONE word only — BUY, SELL, or HOLD.\n"
-        f"Coin: {market['symbol']}\n"
-        f"Price: ${market['price']:,.4f}\n"
-        f"24h: {market['change_24h']:+.2f}%  1h: {market['change_1h']:+.2f}%\n"
-        f"High: ${market['high_24h']:,.4f}  Low: ${market['low_24h']:,.4f}\n"
-        "Signal:"
+        "Analyze the following technical market metrics and classify the short-term sentiment momentum. "
+        "Choose and output exactly one word from this list: BUY, SELL, or HOLD. "
+        "Do not write any introductory text, reasoning, or financial disclaimers. Output only the single chosen word.\n"
+        f"Symbol: {market['symbol']}\n"
+        f"Current Price: {market['price']}\n"
+        f"24h change: {market['change_24h']:+.2f}%\n"
+        f"1h change: {market['change_1h']:+.2f}%\n"
+        f"High: {market['high_24h']}\n"
+        f"Low: {market['low_24h']}\n"
+        "Momentum Classification:"
     )
 
 
@@ -160,24 +161,24 @@ async def health():
 
 
 @app.get("/market/{coin}")
-async def market_route(coin: str):
-    data = await get_market(coin)
+async def market_route(coin: str, category: str = "linear"):
+    data = await get_market(coin, category)
     return JSONResponse(data or {"error": "not found"})
 
 
 @app.get("/analyze/{coin}")
-async def analyze(coin: str):
+async def analyze(coin: str, category: str = "linear"):
     """
     SSE stream — emits events as each model responds.
     Client reads line-by-line: lines starting with 'data: ' contain JSON.
     """
     async def event_stream():
         # 1. market data
-        market = await get_market(coin)
+        market = await get_market(coin, category)
         if not market:
-            yield f"data: {json.dumps({'type': 'error', 'msg': 'No market data'})}\n\n"
+            yield f"data: {json.dumps({'type': 'error', 'coin': coin, 'msg': 'No market data'})}\n\n"
             return
-        yield f"data: {json.dumps({'type': 'market', 'data': market})}\n\n"
+        yield f"data: {json.dumps({'type': 'market', 'coin': coin, 'data': market})}\n\n"
 
         # 2. all models in parallel — yield each result as soon as it arrives
         async with httpx.AsyncClient() as client:
@@ -190,9 +191,10 @@ async def analyze(coin: str):
                 done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
                 for fut in done:
                     result = fut.result()
-                    yield f"data: {json.dumps({'type': 'signal', 'result': result})}\n\n"
+                    yield f"data: {json.dumps({'type': 'signal', 'coin': coin, 'result': result})}\n\n"
 
-        yield f"data: {json.dumps({'type': 'done'})}\n\n"
+        yield f"data: {json.dumps({'type': 'done', 'coin': coin})}\n\n"
 
     return StreamingResponse(event_stream(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
