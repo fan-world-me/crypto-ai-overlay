@@ -6,6 +6,12 @@ load_dotenv()
 NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY", "")
 GROQ_API_KEY   = os.getenv("GROQ_API_KEY", "")
 
+# Bybit Credentials
+BYBIT_API_KEY     = os.getenv("BYBIT_API_KEY", "")
+BYBIT_API_SECRET  = os.getenv("BYBIT_API_SECRET", "")
+BYBIT_USE_TESTNET = os.getenv("BYBIT_USE_TESTNET", "true").lower() == "true"
+BYBIT_BASE_URL    = os.getenv("BYBIT_BASE_URL", "").strip()
+
 COINS = {
     "BTC":  "BTCUSDT",
     "ETH":  "ETHUSDT",
@@ -13,6 +19,16 @@ COINS = {
     "SOL":  "SOLUSDT",
     "DOGE": "DOGEUSDT",
 }
+
+# Quantity decimal precision for each coin on Bybit Futures
+COIN_PRECISION = {
+    "BTC":  3,
+    "ETH":  2,
+    "TON":  1,
+    "SOL":  2,
+    "DOGE": 0,
+}
+
 
 NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
 GROQ_BASE_URL   = "https://api.groq.com/openai/v1/chat/completions"
