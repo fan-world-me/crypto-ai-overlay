@@ -1,0 +1,10 @@
+.env
+.env.*
+__pycache__/
+*.py[cod]
+run.log
+.venv/
+venv/
+.idea/
+.gradle/
+build/
