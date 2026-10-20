@@ -33,29 +33,37 @@ COIN_PRECISION = {
 NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
 GROQ_BASE_URL   = "https://api.groq.com/openai/v1/chat/completions"
 
-# All model IDs verified working (live-tested June 2025).
-# NIM free tier: integrate.api.nvidia.com  |  Groq free tier: api.groq.com/openai/v1
+# Model IDs checked against provider docs on 2026-10-20.
+# Retired and removed: NVIDIA llama-3.1-8b/70b-instruct, nemotron-mini-4b-instruct,
+# llama-3.1-nemotron-nano-8b-v1, solar-10.7b-instruct (HTTP 410 EOL 2026-07/08),
+# Groq llama-3.1-8b-instant, llama-3.3-70b-versatile, qwen3-32b, llama-4-scout (shut down 2026-07/08).
+#
+# Per-model "extra" is merged into the request body to switch thinking off:
+#   - NVIDIA Nemotron 3.x: chat_template_kwargs.enable_thinking=false
+#   - Groq Qwen3.8:        reasoning_effort="none"
+#   - Groq GPT-OSS:        reasoning can't be disabled, so effort=low + hide it from the output
 NVIDIA_MODELS = [
-    {"id": "meta/llama-3.1-8b-instruct",               "name": "NIM Llama-3.1-8B",    "provider": "nvidia"},
-    {"id": "nvidia/nemotron-mini-4b-instruct",          "name": "NIM Nemotron-4B",     "provider": "nvidia"},
-    {"id": "nvidia/llama-3.1-nemotron-nano-8b-v1",     "name": "NIM Nemotron-Nano-8B","provider": "nvidia"},
-    {"id": "upstage/solar-10.7b-instruct",              "name": "NIM Solar-10B",       "provider": "nvidia"},
-    {"id": "meta/llama-3.1-70b-instruct",               "name": "NIM Llama-3.1-70B",   "provider": "nvidia"},
-    {"id": "mistralai/mixtral-8x7b-instruct-v0.1",     "name": "NIM Mixtral-8x7B",    "provider": "nvidia"},
+    {"id": "nvidia/nemotron-3-ultra-550b-a55b",              "name": "NIM Nemotron-Ultra-550B",   "provider": "nvidia",
+     "extra": {"chat_template_kwargs": {"enable_thinking": False}}},
+    {"id": "nvidia/nemotron-3.5-lightning-30b-a3b",          "name": "NIM Nemotron-Lightning-30B", "provider": "nvidia",
+     "extra": {"chat_template_kwargs": {"enable_thinking": False}}},
+    {"id": "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning",  "name": "NIM Nemotron-Omni-30B",     "provider": "nvidia",
+     "extra": {"chat_template_kwargs": {"enable_thinking": False}}},
 ]
 
 GROQ_MODELS = [
-    {"id": "llama-3.1-8b-instant",                            "name": "Groq Llama-8B",      "provider": "groq"},
-    {"id": "llama-3.3-70b-versatile",                         "name": "Groq Llama-70B",     "provider": "groq"},
-    {"id": "meta-llama/llama-4-scout-17b-16e-instruct",       "name": "Groq Llama-4-Scout", "provider": "groq"},
-    {"id": "qwen/qwen3-32b",                                   "name": "Groq Qwen3-32B",     "provider": "groq", "is_reasoning": True},
+    {"id": "openai/gpt-oss-20b",   "name": "Groq GPT-OSS-20B",  "provider": "groq", "is_reasoning": True,
+     "extra": {"reasoning_effort": "low", "include_reasoning": False}},
+    {"id": "openai/gpt-oss-120b",  "name": "Groq GPT-OSS-120B", "provider": "groq", "is_reasoning": True,
+     "extra": {"reasoning_effort": "low", "include_reasoning": False}},
+    {"id": "qwen/qwen3.8-27b",     "name": "Groq Qwen3.8-27B",  "provider": "groq",
+     "extra": {"reasoning_effort": "none"}},
 ]
 
 ALL_MODELS = NVIDIA_MODELS + GROQ_MODELS
 
 AI_TIMEOUT_SEC   = 10.0   # cloud APIs vary; 10s covers p99
 MAX_TOKENS       = 6      # enough for BUY/SELL/HOLD + punctuation
-REASONING_TOKENS = 1000   # reserved for future reasoning models
+REASONING_TOKENS = 1000   # budget for models that can't fully disable reasoning (GPT-OSS)
 AI_REFRESH_SEC   = 20     # AI votes refresh every 20 seconds to conserve API credits
 LIVE_PRICE_REFRESH_SEC = 1.2 # Price updates in real-time every 1.2 seconds
-
