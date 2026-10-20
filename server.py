@@ -244,6 +244,8 @@ async def query_model(client: httpx.AsyncClient, model: dict, market: dict) -> d
         "temperature": 0.1,
         "stream":      False,
     }
+    # Provider-specific switches that turn thinking off (see config.py)
+    payload.update(model.get("extra", {}))
     t0 = time.monotonic()
     try:
         resp = await client.post(
@@ -261,7 +263,7 @@ async def query_model(client: httpx.AsyncClient, model: dict, market: dict) -> d
             return {"model": model["name"], "signal": "ERR", "latency_ms": elapsed,
                     "ok": False, "err": str(err)[:60]}
         data   = resp.json()
-        text   = data["choices"][0]["message"]["content"]
+        text   = data["choices"][0]["message"].get("content") or ""
         signal = _parse(text)
         return {"model": model["name"], "signal": signal, "latency_ms": elapsed, "ok": True}
     except httpx.TimeoutException:
